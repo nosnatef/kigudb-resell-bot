@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 reports/
 .cache/
+
+# Cloudflare local secrets and build output
+.dev.vars
+.dev.vars.*
+.wrangler/
+node_modules/

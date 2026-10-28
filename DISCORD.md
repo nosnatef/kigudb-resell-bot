@@ -33,11 +33,11 @@ From this project in PowerShell:
 2. In **Settings → Secrets and variables → Actions → Secrets**, add `DATABASE_URL`, `DISCORD_BOT_TOKEN`, and `DISCORD_CHANNEL_ID`. Reuse the existing database secret if configured. The runner needs network access to the database and Discord.
 3. Delivery history is restored and saved automatically using GitHub Actions cache. No database setup is needed.
 4. Under Actions **Variables**, set `DISCORD_POSTING_ENABLED` to `true`. This explicitly enables both scheduled and manual runs. Set it to `false` to stop posting.
-5. Under **Actions → Discord resell post every 30 minutes → Run workflow**, leave **send** unchecked to preview. Check **send** for a real message. Schedules run at minutes **07 and 37** of every UTC hour. No timezone or daylight-saving changes are needed.
+5. Under **Actions → Discord resell post every 30 minutes → Run workflow**, leave **send** unchecked to preview. Check **send** for a real message. Automatic runs are triggered by the Cloudflare Worker at minutes **07 and 37** of every UTC hour. Follow [Cloudflare setup](cloudflare-cron/README.md) to deploy it. GitHub?s native schedule is disabled; keep the workflow enabled for API dispatch and manual runs.
 
 Standard GitHub-hosted runners are free for public repositories: <https://docs.github.com/en/actions/concepts/billing-and-usage>. Private repositories consume your plan's minutes, shared with the importer; do not assume they will remain free. No additional hosting service is needed; your existing database costs remain separate.
 
-Scheduled Actions are best-effort: jobs can be delayed or dropped, and public repository schedules disable after 60 days without repository activity. See <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule>. GitHub Actions controls the posting interval. The bot has no internal cooldown: each scheduled or manual send run can send one unposted listing. If you require exactly one post every 30 minutes, Actions is not an exact scheduler.
+Cloudflare controls the posting schedule, and GitHub Actions executes each dispatched run. GitHub runner queues can still delay execution. The bot has no internal cooldown: each send run can post one unposted listing. Cloudflare dispatches appear as manual/API-triggered workflow runs in GitHub.
 
 ## Delivery tracking and recovery
 

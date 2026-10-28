@@ -1,8 +1,6 @@
 name: Discord resell post every 30 minutes
 
 on:
-  schedule:
-    - cron: '7,37 * * * *'
   workflow_dispatch:
     inputs:
       send:
@@ -44,7 +42,7 @@ jobs:
           GROQ_MODEL: ${{ vars.GROQ_MODEL }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          SEND: ${{ github.event_name == 'schedule' || inputs.send }}
+          SEND: ${{ inputs.send }}
         shell: bash
         run: |
           if [ "$SEND" = "true" ]; then
