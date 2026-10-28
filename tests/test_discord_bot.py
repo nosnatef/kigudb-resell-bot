@@ -5,7 +5,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import Mock, patch
 
-from discord_bot import character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message
+from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message
 
 
 class DiscordTests(unittest.TestCase):
@@ -35,6 +35,19 @@ class DiscordTests(unittest.TestCase):
         self.assertNotIn("description", embed)
         self.assertNotIn("url", embed)
         self.assertEqual(embed["title"], "Alice")
+
+    def test_database_diagnostics_do_not_expose_connection_details(self):
+        cases = [("password authentication failed", "authentication failed"),
+                 ("could not translate host name", "hostname"),
+                 ("Network is unreachable", "network is unreachable"),
+                 ("connection timeout expired", "timed out"),
+                 ("SSL error", "TLS"), ("unrecognized failure", "operation failed")]
+        for detail, expected in cases:
+            with self.subTest(detail=detail):
+                hint = database_error_hint(Exception(detail + " private-password private-host"))
+                self.assertIn(expected, hint)
+                self.assertNotIn("private-password", hint)
+                self.assertNotIn("private-host", hint)
 
     def test_character_missing_translations(self):
         self.assertEqual(character_text({"character": "Alice"}), "Alice")

@@ -24,6 +24,26 @@ class DiscordDeliveryError(RuntimeError):
     """A credential-free error safe to display in the CLI."""
 
 
+def database_error_hint(error):
+    # Classify internally; never print raw libpq errors containing connection details.
+    detail = str(error).lower()
+    if "password authentication failed" in detail or "no password supplied" in detail:
+        return "Database authentication failed. Update the DATABASE_URL Actions secret with the correct database credentials."
+    if any(text in detail for text in ("could not translate host name", "name or service not known", "name resolution", "nodename nor servname")):
+        return "Database hostname could not be resolved. Check the host in the DATABASE_URL Actions secret."
+    if "network is unreachable" in detail:
+        return "Database network is unreachable. Use a database endpoint reachable from GitHub-hosted runners; check IPv4/IPv6 connectivity."
+    if "connection refused" in detail:
+        return "Database connection refused. Check the database endpoint, port, service status, and public access."
+    if "timeout" in detail or "timed out" in detail:
+        return "Database connection timed out. Check database availability and firewall access from GitHub-hosted runners."
+    if "ssl" in detail or "certificate" in detail:
+        return "Database TLS connection failed. Check the provider connection URL, sslmode, and certificate requirements."
+    if "no pg_hba.conf entry" in detail:
+        return "Database rejected this connection. Check database network allowlists and TLS requirements."
+    return "Database connection or operation failed. Check the DATABASE_URL Actions secret, provider status, and runner network access."
+
+
 @contextmanager
 def delivery_cache(path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +240,12 @@ if __name__ == "__main__":
         main()
     except DiscordDeliveryError as error:
         print(f"Discord poster failed: {error}")
+        raise SystemExit(1)
+    except psycopg.OperationalError as error:
+        print(f"Discord poster failed: {database_error_hint(error)}")
+        raise SystemExit(1)
+    except sqlite3.OperationalError:
+        print("Discord poster failed: local SQLite cache could not be accessed. Check cache permissions, disk space, and concurrent local processes.")
         raise SystemExit(1)
     except Exception as error:
         # HTTP/DB exception strings can contain credentials. Never log them.
