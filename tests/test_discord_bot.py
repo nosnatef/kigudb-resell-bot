@@ -5,7 +5,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import Mock, patch
 
-from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message
+from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_description, TRANSLATION_PROMPT
 
 
 class DiscordTests(unittest.TestCase):
@@ -35,6 +35,42 @@ class DiscordTests(unittest.TestCase):
         self.assertNotIn("description", embed)
         self.assertNotIn("url", embed)
         self.assertEqual(embed["title"], "Alice")
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "private-groq-key"})
+    @patch("discord_bot.requests.post")
+    def test_translation_prompt_and_embed(self, post):
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {"choices": [{"finish_reason": "stop",
+            "message": {"content": "Mask for sale\nGood condition."}}]}
+        listing = self.post()
+        prepare_translation(listing)
+        self.assertIn("\u5934\u58f3 = mask", TRANSLATION_PROMPT)
+        messages = post.call_args.kwargs["json"]["messages"]
+        self.assertEqual(messages[1]["content"], listing["note"])
+        embed = payload(listing, "123", self.rates)["embeds"][0]
+        self.assertEqual(embed["title"], "Mask for sale")
+        self.assertIn("Good condition.", embed["description"])
+        self.assertIn(listing["link"], embed["description"])
+        listing["english_note"] = "x" * 5000
+        self.assertLessEqual(len(payload(listing, "123", self.rates)["embeds"][0]["description"]), 4096)
+
+    @patch.dict("os.environ", {"GROQ_API_KEY": "private-groq-key"})
+    @patch("discord_bot.requests.post")
+    def test_failed_translation_does_not_reserve(self, post):
+        post.return_value.status_code = 401
+        post.return_value.text = "private-groq-key"
+        with TemporaryDirectory() as directory:
+            with delivery_cache(Path(directory) / "history.sqlite3") as cache:
+                with patch("discord_bot.next_post", return_value=self.post()):
+                    with self.assertRaisesRegex(RuntimeError, "HTTP 401") as error:
+                        reserve(Mock(), "123", cache, prepare_translation)
+                self.assertNotIn("private-groq-key", str(error.exception))
+                self.assertEqual(cache.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
+
+    @patch("discord_bot.requests.post")
+    def test_empty_note_skips_translation(self, post):
+        self.assertEqual(translate_description(None), "")
+        post.assert_not_called()
 
     def test_database_diagnostics_do_not_expose_connection_details(self):
         cases = [("password authentication failed", "authentication failed"),
