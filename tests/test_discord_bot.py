@@ -117,6 +117,17 @@ class DiscordTests(unittest.TestCase):
         self.assertEqual(translate_title(None), "")
         post.assert_not_called()
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "secret"})
+    @patch("discord_bot.requests.post")
+    def test_full_input_is_sent_and_chinese_output_is_accepted(self, post):
+        source = "x" * 400 + " \u5de5\u574a full mask with lock"
+        translation = "Workshop \u5de5\u574a full mask with lock"
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {"choices": [{"finish_reason": "stop", "message": {"content": translation}}]}
+        self.assertEqual(translate_title(source), translation)
+        post.assert_called_once()
+        self.assertEqual(post.call_args.kwargs["json"]["messages"][1]["content"], source)
+
     def test_translation_references_handle_missing_names(self):
         self.assertEqual(translation_references({}), {})
         self.assertEqual(translation_references({"maker_en": None, "character_jp": "Alice JP"}),

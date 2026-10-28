@@ -60,3 +60,5 @@ Only the first line of the listing note (the original listing title) is sent to 
 Translation prompts include available English, Chinese, and Japanese maker, character, media (Origin), and sub-media (SubOrigin) names from the listing?s relations. These references guide translation of names already mentioned in the title, preferring stored English names. Price, maker, and character fields keep their existing formatting.
 
 If the English title exceeds 256 characters, its full translation also appears in the embed body above the Goofish link. If the translation exceeds Discord embed limits, it is attached in full as `translation.txt` instead (the bot then needs Attach Files permission).
+
+The entire listing title is passed to Groq before applying Discord title limits. Chinese names may remain in the result; their presence does not trigger rejection or a retry.
