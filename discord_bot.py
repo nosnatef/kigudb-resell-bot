@@ -1,4 +1,4 @@
-"""Post at most one unsent FOR_SALE listing per 30 minutes to a Discord channel."""
+"""Post one unsent FOR_SALE listing per run to a Discord channel."""
 import argparse
 import hashlib
 import json
@@ -135,10 +135,7 @@ def reserve(conn, channel_id, cache):
     # Serialize processes sharing this file and persist before contacting Discord.
     cache.execute("BEGIN IMMEDIATE")
     try:
-        recent = cache.execute(
-            "SELECT 1 FROM deliveries WHERE channel_id = ? AND reserved_at > ? LIMIT 1",
-            (channel_id, time.time() - 1800)).fetchone()
-        post = None if recent else next_post(conn, channel_id, cache)
+        post = next_post(conn, channel_id, cache)
         if post:
             cache.execute("INSERT INTO deliveries (channel_id, post_id, reserved_at) VALUES (?, ?, ?)",
                           (channel_id, post["id"], time.time()))
@@ -222,7 +219,7 @@ def main():
             conn.execute("SET default_transaction_read_only = on")
             post = reserve(conn, channel_id, cache) if args.send else next_post(conn, channel_id, cache)
         if not post:
-            print("Nothing to send: 30-minute cooldown or no unposted FOR_SALE listings.")
+            print("Nothing to send: no unposted FOR_SALE listings.")
             return
         message = payload(post, channel_id, rates)
         if not args.send:

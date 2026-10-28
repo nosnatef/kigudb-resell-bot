@@ -62,20 +62,21 @@ class DiscordTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no listing reserved"):
             exchange_rates()
 
-    def test_cache_persists_and_enforces_channel_cooldown(self):
+    def test_cache_persists_and_allows_immediate_next_reservation(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "history.sqlite3"
             with delivery_cache(path) as cache:
                 with patch("discord_bot.next_post", return_value=self.post()):
                     self.assertEqual(reserve(Mock(), "123", cache)["id"], "post-1")
             with delivery_cache(path) as cache:
-                with patch("discord_bot.next_post") as select:
-                    self.assertIsNone(reserve(Mock(), "123", cache))
-                    select.assert_not_called()
+                second = dict(self.post(), id="post-2")
+                with patch("discord_bot.next_post", return_value=second) as select:
+                    self.assertEqual(reserve(Mock(), "123", cache)["id"], "post-2")
+                    select.assert_called_once()
                 self.assertIsNone(cache.execute("SELECT sent_at FROM deliveries").fetchone()[0])
                 conn = Mock()
                 next_post(conn, "123", cache)
-                self.assertEqual(conn.execute.call_args.args[1], (["post-1"],))
+                self.assertEqual(conn.execute.call_args.args[1], (["post-1", "post-2"],))
                 next_post(conn, "456", cache)
                 self.assertEqual(conn.execute.call_args.args[1], ([],))
 

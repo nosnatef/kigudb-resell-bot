@@ -37,11 +37,11 @@ From this project in PowerShell:
 
 Standard GitHub-hosted runners are free for public repositories: <https://docs.github.com/en/actions/concepts/billing-and-usage>. Private repositories consume your plan's minutes, shared with the importer; do not assume they will remain free. No additional hosting service is needed; your existing database costs remain separate.
 
-Scheduled Actions are best-effort: jobs can be delayed or dropped, and public repository schedules disable after 60 days without repository activity. See <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule>. This bot enforces a minimum 30-minute gap between reservations. A delayed run can cause the following scheduled run to skip; it never sends catch-up bursts. If you require exactly one post every 30 minutes, Actions is not an exact scheduler.
+Scheduled Actions are best-effort: jobs can be delayed or dropped, and public repository schedules disable after 60 days without repository activity. See <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule>. GitHub Actions controls the posting interval. The bot has no internal cooldown: each scheduled or manual send run can send one unposted listing. If you require exactly one post every 30 minutes, Actions is not an exact scheduler.
 
 ## Delivery tracking and recovery
 
-Delivery history lives in `.cache/discord-deliveries.sqlite3` inside this project, ignored by Git. It records each channel/listing pair, reservation time, Discord message ID, and sent time. SQLite locking serializes processes sharing the same file. Each attempt reserves its listing before contacting Discord and enforces a 30-minute cooldown. Price changes do not cause reposts.
+Delivery history lives in `.cache/discord-deliveries.sqlite3` inside this project, ignored by Git. It records each channel/listing pair, reservation time, Discord message ID, and sent time. SQLite locking serializes processes sharing the same file. Each attempt reserves its listing before contacting Discord to prevent duplicate delivery. Price changes do not cause reposts.
 
 GitHub Actions restores the latest cache and saves a new snapshot even after a failed send. Workflow concurrency prevents overlapping Actions runs. Caches can be evicted or deleted; losing the cache loses deduplication history. Local runs and Actions have separate histories unless you copy the cache between them. Use a single runner/history for a channel to avoid duplicates.
 
