@@ -106,17 +106,33 @@ def translate_description(note):
     key = os.environ.get("GROQ_API_KEY", "")
     if not key:
         raise DiscordDeliveryError("Set GROQ_API_KEY to translate descriptions; no listing reserved.")
+    model = os.environ.get("GROQ_MODEL", "").strip() or "openai/gpt-oss-20b"
+    options = {"reasoning_effort": "low"} if model.startswith("openai/gpt-oss-") else {}
     try:
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
-            json={"model": os.environ.get("GROQ_MODEL") or "llama-3.3-70b-versatile",
+            json={"model": model, **options,
                   "messages": [{"role": "system", "content": TRANSLATION_PROMPT},
                                {"role": "user", "content": note}],
                   "temperature": 0, "max_completion_tokens": 2048}, timeout=60)
         if response.status_code != 200:
+            try:
+                error_code = response.json().get("error", {}).get("code")
+            except (ValueError, AttributeError):
+                error_code = None
+            # Only display known codes; provider text may echo credentials or listing data.
+            hints = {
+                "model_not_found": "The model does not exist or this key cannot access it. Set GROQ_MODEL to an available model in your Groq project.",
+                "model_decommissioned": "The model was retired. Update GROQ_MODEL.",
+                "invalid_api_key": "Check the GROQ_API_KEY Actions secret.",
+                "rate_limit_exceeded": "Groq rate limit reached. Retry later or check project limits.",
+            }
+            hint = hints.get(error_code) if isinstance(error_code, str) else None
+            hint = hint or ("Model or endpoint unavailable; check your Groq project's model access and GROQ_MODEL." if response.status_code == 404
+                            else "Check API key, model access, and quota.")
             raise DiscordDeliveryError(
-                f"Groq translation failed (HTTP {response.status_code}); no listing reserved. Check API key, model, and quota.")
+                f"Groq translation failed (HTTP {response.status_code}): {hint} No listing reserved.")
         choice = response.json()["choices"][0]
         translation = choice["message"]["content"]
         if choice.get("finish_reason") != "stop" or not isinstance(translation, str) or not translation.strip():

@@ -67,6 +67,16 @@ class DiscordTests(unittest.TestCase):
                 self.assertNotIn("private-groq-key", str(error.exception))
                 self.assertEqual(cache.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
 
+    @patch.dict("os.environ", {"GROQ_API_KEY": "secret", "GROQ_MODEL": " "})
+    @patch("discord_bot.requests.post")
+    def test_unavailable_model_has_safe_actionable_error(self, post):
+        post.return_value.status_code = 404
+        post.return_value.json.return_value = {"error": {"code": "model_not_found", "message": "secret"}}
+        with self.assertRaisesRegex(RuntimeError, "cannot access") as error:
+            translate_description("Listing")
+        self.assertNotIn("secret", str(error.exception))
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "openai/gpt-oss-20b")
+
     @patch("discord_bot.requests.post")
     def test_empty_note_skips_translation(self, post):
         self.assertEqual(translate_description(None), "")

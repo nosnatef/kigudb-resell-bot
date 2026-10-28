@@ -53,6 +53,6 @@ Discord references: <https://discord.com/developers/docs/quick-start/getting-sta
 
 ## English translation with Groq
 
-Add `GROQ_API_KEY` to local `.env` and to GitHub repository Actions secrets. The workflow passes it to the bot. Optionally set `GROQ_MODEL` in `.env` or as an Actions variable; the default is `llama-3.3-70b-versatile`.
+Add `GROQ_API_KEY` to local `.env` and to GitHub repository Actions secrets. The workflow passes it to the bot. Optionally set `GROQ_MODEL` in `.env` or as an Actions variable; the default is `openai/gpt-oss-20b`.
 
 The listing note is sent to Groq for English translation. The prompt explicitly requires ??? = mask? and preserves listing facts. The English first line becomes the title, and the translated note appears in the description above the Goofish link. Long descriptions are truncated for Discord. Preview also calls Groq. Empty notes need no translation. Failed translations stop before a reservation is saved, allowing a later run to retry. Existing Discord posts are not edited.
