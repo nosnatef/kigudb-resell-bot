@@ -5,7 +5,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import Mock, patch
 
-from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_description, TRANSLATION_PROMPT
+from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_description, translation_references, TRANSLATION_PROMPT
 
 
 class DiscordTests(unittest.TestCase):
@@ -43,12 +43,25 @@ class DiscordTests(unittest.TestCase):
         post.return_value.json.return_value = {"choices": [{"finish_reason": "stop",
             "message": {"content": "Mask for sale\nGood condition."}}]}
         listing = self.post()
+        listing.update(maker_en="Studio Luna", maker_zh="\u6708\u4eae\u5de5\u623f",
+                       character_zh="\u7231\u4e3d\u4e1d", media_en="Wonderland", media_jp="\u4e0d\u601d\u8b70",
+                       sub_media_en="Wonderland II")
+        original = dict(listing)
         prepare_translation(listing)
+        self.assertEqual({key: listing[key] for key in original}, original)
         self.assertIn("\u5934\u58f3 = mask", TRANSLATION_PROMPT)
         messages = post.call_args.kwargs["json"]["messages"]
         self.assertEqual(messages[1]["content"], listing["note"])
+        self.assertIn("Studio Luna", messages[0]["content"])
+        self.assertIn("Wonderland", messages[0]["content"])
+        self.assertIn("Wonderland II", messages[0]["content"])
+        self.assertIn(listing["character_zh"], messages[0]["content"])
+        self.assertNotIn(listing["link"], messages[0]["content"])
         embed = payload(listing, "123", self.rates)["embeds"][0]
-        self.assertEqual(embed["title"], "Mask for sale")
+        original_embed = payload(original, "123", self.rates)["embeds"][0]
+        self.assertEqual(embed["title"], original_embed["title"])
+        self.assertEqual(embed["fields"], original_embed["fields"])
+        self.assertEqual(embed["url"], original_embed["url"])
         self.assertIn("Good condition.", embed["description"])
         self.assertIn(listing["link"], embed["description"])
         listing["english_note"] = "x" * 5000
@@ -81,6 +94,11 @@ class DiscordTests(unittest.TestCase):
     def test_empty_note_skips_translation(self, post):
         self.assertEqual(translate_description(None), "")
         post.assert_not_called()
+
+    def test_translation_references_handle_missing_names(self):
+        self.assertEqual(translation_references({}), {})
+        self.assertEqual(translation_references({"maker_en": None, "character_jp": "Alice JP"}),
+                         {"character": {"ja": "Alice JP"}})
 
     def test_database_diagnostics_do_not_expose_connection_details(self):
         cases = [("password authentication failed", "authentication failed"),
