@@ -51,10 +51,10 @@ When switching from the previous database delivery log, existing history is not 
 
 Discord references: <https://discord.com/developers/docs/quick-start/getting-started>, <https://discord.com/developers/docs/resources/message#create-message>.
 
-## English translation with Groq
+## English title translation with Groq
 
 Add `GROQ_API_KEY` to local `.env` and to GitHub repository Actions secrets. The workflow passes it to the bot. Optionally set `GROQ_MODEL` in `.env` or as an Actions variable; the default is `openai/gpt-oss-20b`.
 
-The listing note is sent to Groq for English translation. The prompt explicitly requires ??? = mask? and preserves listing facts. Only the description uses the translated note, above the Goofish link. The title uses the original note, and metadata keeps its existing formatting. Long descriptions are truncated for Discord. Preview also calls Groq. Empty notes need no translation. Failed translations stop before a reservation is saved, allowing a later run to retry. Existing Discord posts are not edited.
+Only the first line of the listing note (the original listing title) is sent to Groq for English translation and used as the clickable embed title, limited to 256 characters. The translated note block and source metadata are omitted from the embed; its description contains only the Goofish link. The prompt requires ?\u5934\u58f3 = mask?. Preview also calls Groq. Empty titles need no translation. Failed translations stop before a reservation is saved. Existing Discord posts are not edited.
 
-Translation prompts include available English, Chinese, and Japanese maker, character, media (Origin), and sub-media (SubOrigin) names from the listing?s relations. Groq uses these as reference mappings only for names already mentioned in the description, preferring stored English names. The displayed metadata is unchanged.
+Translation prompts include available English, Chinese, and Japanese maker, character, media (Origin), and sub-media (SubOrigin) names from the listing?s relations. These references guide translation of names already mentioned in the title, preferring stored English names. Price, maker, and character fields keep their existing formatting.

@@ -5,7 +5,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import Mock, patch
 
-from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_description, translation_references, TRANSLATION_PROMPT
+from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_title, translation_references, TRANSLATION_PROMPT
 
 
 class DiscordTests(unittest.TestCase):
@@ -43,6 +43,7 @@ class DiscordTests(unittest.TestCase):
         post.return_value.json.return_value = {"choices": [{"finish_reason": "stop",
             "message": {"content": "Mask for sale\nGood condition."}}]}
         listing = self.post()
+        listing["note"] += "\nSeller: Someone\nRegion: Somewhere\nSource: https://example.com"
         listing.update(maker_en="Studio Luna", maker_zh="\u6708\u4eae\u5de5\u623f",
                        character_zh="\u7231\u4e3d\u4e1d", media_en="Wonderland", media_jp="\u4e0d\u601d\u8b70",
                        sub_media_en="Wonderland II")
@@ -51,7 +52,8 @@ class DiscordTests(unittest.TestCase):
         self.assertEqual({key: listing[key] for key in original}, original)
         self.assertIn("\u5934\u58f3 = mask", TRANSLATION_PROMPT)
         messages = post.call_args.kwargs["json"]["messages"]
-        self.assertEqual(messages[1]["content"], listing["note"])
+        self.assertEqual(messages[1]["content"], listing["note"].split("\n")[0])
+        self.assertNotIn("Seller:", messages[1]["content"])
         self.assertIn("Studio Luna", messages[0]["content"])
         self.assertIn("Wonderland", messages[0]["content"])
         self.assertIn("Wonderland II", messages[0]["content"])
@@ -59,13 +61,14 @@ class DiscordTests(unittest.TestCase):
         self.assertNotIn(listing["link"], messages[0]["content"])
         embed = payload(listing, "123", self.rates)["embeds"][0]
         original_embed = payload(original, "123", self.rates)["embeds"][0]
-        self.assertEqual(embed["title"], original_embed["title"])
+        self.assertEqual(embed["title"], "Mask for sale Good condition.")
         self.assertEqual(embed["fields"], original_embed["fields"])
         self.assertEqual(embed["url"], original_embed["url"])
-        self.assertIn("Good condition.", embed["description"])
+        self.assertNotIn("Good condition.", embed["description"])
+        self.assertNotIn("Seller:", embed["description"])
         self.assertIn(listing["link"], embed["description"])
-        listing["english_note"] = "x" * 5000
-        self.assertLessEqual(len(payload(listing, "123", self.rates)["embeds"][0]["description"]), 4096)
+        listing["english_title"] = "x" * 5000
+        self.assertEqual(len(payload(listing, "123", self.rates)["embeds"][0]["title"]), 256)
 
     @patch.dict("os.environ", {"GROQ_API_KEY": "private-groq-key"})
     @patch("discord_bot.requests.post")
@@ -86,13 +89,13 @@ class DiscordTests(unittest.TestCase):
         post.return_value.status_code = 404
         post.return_value.json.return_value = {"error": {"code": "model_not_found", "message": "secret"}}
         with self.assertRaisesRegex(RuntimeError, "cannot access") as error:
-            translate_description("Listing")
+            translate_title("Listing")
         self.assertNotIn("secret", str(error.exception))
         self.assertEqual(post.call_args.kwargs["json"]["model"], "openai/gpt-oss-20b")
 
     @patch("discord_bot.requests.post")
     def test_empty_note_skips_translation(self, post):
-        self.assertEqual(translate_description(None), "")
+        self.assertEqual(translate_title(None), "")
         post.assert_not_called()
 
     def test_translation_references_handle_missing_names(self):
