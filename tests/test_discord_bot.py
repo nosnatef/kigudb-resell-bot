@@ -36,6 +36,25 @@ class DiscordTests(unittest.TestCase):
         self.assertNotIn("url", embed)
         self.assertEqual(embed["title"], "Alice")
 
+    def test_long_title_is_fully_in_body(self):
+        listing = dict(self.post(), english_title="English " * 50)
+        embed = payload(listing, "123", self.rates)["embeds"][0]
+        self.assertEqual(len(embed["title"]), 256)
+        self.assertIn(listing["english_title"], embed["description"])
+        listing["english_title"] = "x" * 256
+        self.assertNotIn(listing["english_title"], payload(listing, "123", self.rates)["embeds"][0]["description"])
+
+    @patch("discord_bot.requests.post")
+    def test_oversized_translation_is_attached_in_full(self, post):
+        listing = dict(self.post(), english_title="x" * 5000)
+        message = payload(listing, "123", self.rates)
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {"id": "987"}
+        send_message("token", "123", message)
+        options = post.call_args.kwargs
+        self.assertEqual(options["files"]["files[0]"][1], listing["english_title"].encode())
+        self.assertNotIn("_translation_file", options["data"]["payload_json"])
+
     @patch.dict("os.environ", {"GROQ_API_KEY": "private-groq-key"})
     @patch("discord_bot.requests.post")
     def test_translation_prompt_and_embed(self, post):

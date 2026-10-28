@@ -183,17 +183,28 @@ def payload(post, channel_id, rates):
         ],
         "footer": {"text": "KiguDB · Availability and price may change"},
     }
-    description = ""
+    description = title if post.get("english_title") and len(title) > 256 else ""
+    full_translation = description
     if https_url(post.get("link")):
         embed["url"] = post["link"]
         description = "\n\n".join(part for part in (description, f"[View original listing]({post['link']})") if part)
+    embed_size = len(embed["title"]) + len(embed["footer"]["text"]) + sum(
+        len(field["name"]) + len(field["value"]) for field in embed["fields"])
+    attach_translation = len(description) > 4096 or embed_size + len(description) > 6000
+    if attach_translation:
+        description = "Full translation attached as translation.txt."
+        if embed.get("url"):
+            description += f"\n\n[View original listing]({post['link']})"
     if description:
         embed["description"] = description
     if https_url(post.get("coverImageUrl")):
         embed["image"] = {"url": post["coverImageUrl"]}
-    return {"embeds": [embed], "allowed_mentions": {"parse": []},
+    message = {"embeds": [embed], "allowed_mentions": {"parse": []},
             "nonce": hashlib.sha256(f"{channel_id}:{post['id']}".encode()).hexdigest()[:24],
             "enforce_nonce": True}
+    if attach_translation:
+        message["_translation_file"] = full_translation
+    return message
 
 
 def next_post(conn, channel_id, cache):
@@ -238,9 +249,15 @@ def reserve(conn, channel_id, cache, prepare=None):
 
 def send_message(token, channel_id, message):
     # No automatic HTTP retries: timeout/5xx may mean Discord already accepted it.
+    message = dict(message)
+    translation_file = message.pop("_translation_file", None)
+    options = {"json": message}
+    if translation_file:
+        options = {"data": {"payload_json": json.dumps(message)},
+                   "files": {"files[0]": ("translation.txt", translation_file.encode("utf-8"), "text/plain")}}
     response = requests.post(f"https://discord.com/api/v10/channels/{channel_id}/messages",
         headers={"Authorization": f"Bot {token}", "User-Agent": "KiguDBResellBot (https://kigudb.info, 1.0)"},
-        json=message, timeout=30)
+        **options, timeout=30)
     if response.status_code != 200:
         hints = {
             400: "Discord rejected the message payload (check embed fields and URLs).",
