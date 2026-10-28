@@ -1,0 +1,58 @@
+name: Discord resell post every 30 minutes
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+    inputs:
+      send:
+        description: Send a real Discord message (otherwise preview)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-resell-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    if: vars.DISCORD_POSTING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-discord.txt
+      - run: python -m pip install -r requirements-discord.txt
+      - name: Restore delivery history
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/discord-deliveries.sqlite3
+          key: discord-deliveries-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            discord-deliveries-v1-
+      - name: Post or preview one listing
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          SEND: ${{ github.event_name == 'schedule' || inputs.send }}
+        shell: bash
+        run: |
+          if [ "$SEND" = "true" ]; then
+            python discord_bot.py --send
+          else
+            python discord_bot.py
+          fi
+      - name: Save delivery history even after a failed send
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/discord-deliveries.sqlite3
+          key: discord-deliveries-v1-${{ github.run_id }}-${{ github.run_attempt }}

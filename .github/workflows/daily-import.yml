@@ -1,0 +1,66 @@
+name: Daily resell import
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      write:
+        description: Insert new listings (leave off for a dry run)
+        type: boolean
+        default: false
+      full_scan:
+        description: Include older listings for backfills and retries
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-resell-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Fetch and import new listings
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          IMPORT_USER_ID: ${{ secrets.IMPORT_USER_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          S3_BUCKET: kigu-db
+          S3_PUBLIC_BASE_URL: https://d1kkex4vltbo88.cloudfront.net
+          FEISHU_SHARE_URL: https://scn984wlthg8.feishu.cn/share/base/webpage/shrcn19ZKt2MvLp9NSMGrMyPYuh
+          WRITE: ${{ github.event_name == 'schedule' || inputs.write }}
+          FULL_SCAN: ${{ inputs.full_scan || false }}
+        shell: bash
+        run: |
+          args=()
+          if [ "$FULL_SCAN" = "true" ]; then
+            args+=(--full-scan)
+          fi
+          if [ "$WRITE" = "true" ]; then
+            python worker.py --write "${args[@]}"
+          else
+            python worker.py "${args[@]}"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: import-report
+          path: reports/latest.json
+          retention-days: 7
+          if-no-files-found: ignore
