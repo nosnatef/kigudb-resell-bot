@@ -5,7 +5,7 @@ from decimal import Decimal
 import unittest
 from unittest.mock import Mock, patch
 
-from discord_bot import database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_title, translation_references, TRANSLATION_PROMPT
+from discord_bot import configured_channels, process_channel, main, database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_title, translation_references, TRANSLATION_PROMPT
 
 
 class DiscordTests(unittest.TestCase):
@@ -15,6 +15,47 @@ class DiscordTests(unittest.TestCase):
         return {"id": "post-1", "note": "@everyone " + "x" * 300, "priceRMB": Decimal("7100"),
                 "maker": None, "character": "Alice", "character_jp": "???", "link": "https://www.goofish.com/item?id=12345",
                 "coverImageUrl": "https://cdn.example.com/cover.webp"}
+
+    def test_channel_configuration(self):
+        self.assertEqual(configured_channels({"DISCORD_CHANNEL_ID": "123"}), ["123"])
+        self.assertEqual(configured_channels({"DISCORD_CHANNEL_IDS": "123,456,123", "DISCORD_CHANNEL_ID": "789"}), ["123", "456"])
+        self.assertEqual(configured_channels({"DISCORD_CHANNEL_IDS": "", "DISCORD_CHANNEL_ID": "123"}), ["123"])
+        with self.assertRaises(RuntimeError):
+            configured_channels({"DISCORD_CHANNEL_IDS": "123,bad"})
+
+    @patch("discord_bot.send_message", return_value="987")
+    @patch("discord_bot.prepare_translation")
+    def test_channels_advance_independently_and_history_survives(self, prepare, send):
+        first = self.post()
+        second = dict(first, id="post-2")
+        conn = Mock()
+        def execute(query, params):
+            excluded = params[0]
+            return Mock(fetchone=lambda: next((dict(p) for p in (first, second) if p["id"] not in excluded), None))
+        conn.execute.side_effect = execute
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "history.sqlite3"
+            with delivery_cache(path) as cache:
+                process_channel(conn, cache, "123", "token", self.rates, True)
+            with delivery_cache(path) as cache:
+                process_channel(conn, cache, "123", "token", self.rates, True)
+                process_channel(conn, cache, "456", "token", self.rates, True)
+                self.assertEqual(cache.execute("SELECT channel_id, post_id FROM deliveries ORDER BY channel_id, post_id").fetchall(),
+                                 [("123", "post-1"), ("123", "post-2"), ("456", "post-1")])
+                process_channel(conn, cache, "123", "token", self.rates, True)
+                self.assertEqual(send.call_count, 3)
+
+    @patch.dict("os.environ", {"DISCORD_CHANNEL_IDS": "123,456", "DISCORD_BOT_TOKEN": "token", "DATABASE_URL": "postgresql://example/db"})
+    @patch("discord_bot.exchange_rates")
+    @patch("discord_bot.psycopg.connect")
+    @patch("discord_bot.process_channel")
+    def test_failed_channel_does_not_block_next(self, process, connect, rates):
+        process.side_effect = [RuntimeError("private connection details"), None]
+        with TemporaryDirectory() as directory:
+            with patch("sys.argv", ["discord_bot.py", "--send", "--cache-file", str(Path(directory) / "cache.sqlite3")]):
+                with self.assertRaisesRegex(RuntimeError, "1 channel"):
+                    main()
+        self.assertEqual([call.args[2] for call in process.call_args_list], ["123", "456"])
 
     def test_embed_limits_mentions_and_stable_nonce(self):
         result = payload(self.post(), "123", self.rates)

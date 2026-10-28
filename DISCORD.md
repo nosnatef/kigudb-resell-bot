@@ -62,3 +62,9 @@ Translation prompts include available English, Chinese, and Japanese maker, char
 If the English title exceeds 256 characters, its full translation also appears in the embed body above the Goofish link. If the translation exceeds Discord embed limits, it is attached in full as `translation.txt` instead (the bot then needs Attach Files permission).
 
 The entire listing title is passed to Groq before applying Discord title limits. Chinese names may remain in the result; their presence does not trigger rejection or a retry.
+
+## Multiple Discord channels
+
+Set `DISCORD_CHANNEL_IDS` in local `.env` and GitHub Actions secrets to comma-separated channel IDs, for example `111111111111111111,222222222222222222`. This overrides the existing single `DISCORD_CHANNEL_ID`, which remains supported. Repeated IDs are processed once.
+
+Each trigger sends at most one oldest unposted FOR_SALE listing to each channel. SQLite delivery history is keyed by channel and listing, so a new channel starts from the oldest available listing independently of existing channels. Keep the current Actions cache to preserve existing history. Adding the bot to a server does not select its destination automatically; add the destination channel ID and grant the bot channel permissions. A failure in one channel does not prevent attempts for the others, but makes the workflow fail visibly. No Cloudflare configuration change is needed.

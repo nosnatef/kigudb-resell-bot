@@ -1,4 +1,4 @@
-"""Post one unsent FOR_SALE listing per run to a Discord channel."""
+"""Post one unsent FOR_SALE listing per run to each configured Discord channel."""
 import argparse
 import hashlib
 import json
@@ -291,6 +291,32 @@ def send_message(token, channel_id, message):
     return message_id
 
 
+def configured_channels(environ):
+    value = environ.get("DISCORD_CHANNEL_IDS", "").strip() or environ.get("DISCORD_CHANNEL_ID", "")
+    channels = list(dict.fromkeys(value.replace(",", " ").split()))
+    if not channels or any(not channel.isascii() or not channel.isdigit() for channel in channels):
+        raise DiscordDeliveryError("Set DISCORD_CHANNEL_IDS to comma-separated numeric channel IDs (or DISCORD_CHANNEL_ID for one channel).")
+    return channels
+
+
+def process_channel(conn, cache, channel_id, token, rates, send):
+    post = reserve(conn, channel_id, cache, prepare_translation) if send else next_post(conn, channel_id, cache)
+    if not post:
+        print(json.dumps({"channelId": channel_id, "status": "empty"}))
+        return
+    if not send:
+        prepare_translation(post)
+    message = payload(post, channel_id, rates)
+    if not send:
+        print(json.dumps({"mode": "preview", "channelId": channel_id, "postId": post["id"], "message": message}, indent=2))
+        return
+    message_id = send_message(token, channel_id, message)
+    cache.execute("""UPDATE deliveries SET message_id = ?, sent_at = ?
+        WHERE channel_id = ? AND post_id = ?""", (message_id, time.time(), channel_id, post["id"]))
+    cache.commit()
+    print(json.dumps({"status": "sent", "channelId": channel_id, "postId": post["id"], "messageId": message_id}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", type=Path)
@@ -302,15 +328,14 @@ def main():
     args = parser.parse_args()
     if args.env_file:
         load_dotenv(args.env_file, override=False)
-    channel_id = os.environ.get("DISCORD_CHANNEL_ID", "")
-    if not args.setup and not channel_id.isdigit():
-        raise ValueError("Set DISCORD_CHANNEL_ID to a numeric channel ID")
+    channels = [] if args.setup else configured_channels(os.environ)
     token = os.environ.get("DISCORD_BOT_TOKEN", "")
     if (args.send or args.check) and not token:
         raise ValueError("Set DISCORD_BOT_TOKEN")
     if args.check:
-        for label, endpoint in (("Bot authentication", "users/@me"),
-                                ("Channel access", f"channels/{channel_id}")):
+        endpoints = [("Bot authentication", "users/@me")] + [
+            (f"Channel {channel_id} access", f"channels/{channel_id}") for channel_id in channels]
+        for label, endpoint in endpoints:
             response = requests.get(f"https://discord.com/api/v10/{endpoint}",
                                     headers={"Authorization": f"Bot {token}"}, timeout=15)
             try:
@@ -328,21 +353,23 @@ def main():
         with psycopg.connect(database_url(os.environ["DATABASE_URL"]), row_factory=dict_row,
                              autocommit=True, connect_timeout=15) as conn:
             conn.execute("SET default_transaction_read_only = on")
-            post = reserve(conn, channel_id, cache, prepare_translation) if args.send else next_post(conn, channel_id, cache)
-        if not post:
-            print("Nothing to send: no unposted FOR_SALE listings.")
-            return
-        if not args.send:
-            prepare_translation(post)
-        message = payload(post, channel_id, rates)
-        if not args.send:
-            print(json.dumps({"mode": "preview", "postId": post["id"], "message": message}, indent=2))
-            return
-        message_id = send_message(token, channel_id, message)
-        cache.execute("""UPDATE deliveries SET message_id = ?, sent_at = ?
-            WHERE channel_id = ? AND post_id = ?""", (message_id, time.time(), channel_id, post["id"]))
-        cache.commit()
-        print(json.dumps({"status": "sent", "postId": post["id"], "messageId": message_id}))
+            failed = 0
+            for channel_id in channels:
+                try:
+                    process_channel(conn, cache, channel_id, token, rates, args.send)
+                except Exception as error:
+                    cache.rollback()
+                    failed += 1
+                    if isinstance(error, DiscordDeliveryError):
+                        detail = str(error)
+                    elif isinstance(error, psycopg.OperationalError):
+                        detail = database_error_hint(error)
+                    else:
+                        detail = f"Operation failed ({type(error).__name__}); inspect delivery history before retrying."
+                    print(f"Channel {channel_id}: {detail}")
+            if failed:
+                raise DiscordDeliveryError(f"{failed} channel(s) failed; other channels were still processed.")
+
 
 
 if __name__ == "__main__":
