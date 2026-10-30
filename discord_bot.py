@@ -229,6 +229,7 @@ def next_post(conn, channel_id, cache):
         LEFT JOIN "Origin" o ON o.id = c."originId"
         LEFT JOIN "SubOrigin" so ON so.id = c."subOriginId"
         WHERE p.status = 'FOR_SALE' AND NOT (p.id::text = ANY(%s::text[]))
+          AND p."createdAt" <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '24 hours'
         ORDER BY p."createdAt" ASC, p.id ASC LIMIT 1
     ''', (excluded,)).fetchone()
 
