@@ -182,7 +182,7 @@ def payload(post, channel_id, rates):
         "color": 0x6D5AE6,
         "fields": [
             {"name": "Price", "value": price_text(post["priceRMB"], rates), "inline": True},
-            {"name": "Maker", "value": (post.get("maker") or "Unknown")[:1024], "inline": True},
+            {"name": "Maker", "value": (" / ".join(name for name in (post.get("maker_en"), post.get("maker_zh")) if name) or "Unknown")[:1024], "inline": True},
             {"name": "Character", "value": character_text(post)[:1024], "inline": True},
         ],
         "footer": {"text": "KiguDB · Availability and price may change"},
@@ -217,7 +217,6 @@ def next_post(conn, channel_id, cache):
         "SELECT post_id FROM deliveries WHERE channel_id = ?", (channel_id,))]
     return conn.execute(f'''
         SELECT p.id, p."priceRMB", p.note, p."coverImageUrl",
-            COALESCE(m.name_zh, m.name_jp, m.name) AS maker,
             m.name AS maker_en, m.name_zh AS maker_zh, m.name_jp AS maker_jp,
             c.name AS character, c.name_zh AS character_zh, c.name_jp AS character_jp,
             o.name AS media_en, o.name_zh AS media_zh, o.name_jp AS media_jp,

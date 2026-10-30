@@ -9,10 +9,6 @@ on:
         description: Insert new listings (leave off for a dry run)
         type: boolean
         default: false
-      full_scan:
-        description: Include older listings for backfills and retries
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -45,17 +41,12 @@ jobs:
           S3_PUBLIC_BASE_URL: https://d1kkex4vltbo88.cloudfront.net
           FEISHU_SHARE_URL: https://scn984wlthg8.feishu.cn/share/base/webpage/shrcn19ZKt2MvLp9NSMGrMyPYuh
           WRITE: ${{ github.event_name == 'schedule' || inputs.write }}
-          FULL_SCAN: ${{ inputs.full_scan || false }}
         shell: bash
         run: |
-          args=()
-          if [ "$FULL_SCAN" = "true" ]; then
-            args+=(--full-scan)
-          fi
           if [ "$WRITE" = "true" ]; then
-            python worker.py --write "${args[@]}"
+            python worker.py --write
           else
-            python worker.py "${args[@]}"
+            python worker.py
           fi
       - uses: actions/upload-artifact@v4
         if: always()
