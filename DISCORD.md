@@ -1,70 +1,87 @@
-# Discord resell bot every 30 minutes
+# Discord posting every 10 minutes
 
-A scheduled Python process sends one rich embed to a normal Discord text channel, then exits. It uses a bot account through Discord's REST API; no always-on server, Gateway connection, privileged intents, or slash commands are required. It may appear offline between runs.
+Cloudflare dispatches the GitHub Actions workflow every 10 minutes. Each run sends at most one listing to each enabled, enrolled Discord server. GitHub runner queues can delay execution. The bot uses REST and needs no always-on Gateway process.
 
-It selects the oldest never-posted `FOR_SALE` database listing that was created at least 24 hours ago, including manually created posts. The 24-hour wait uses the database creation time (`createdAt`) and gives you a day to manually adjust entries before they can be sent. It does not check Feishu availability. Embeds show the source title, converted USD / JPY price, maker, character, cover, Goofish listing links when available. Both the embed title and ?View original listing? point to the Goofish listing; both links are omitted when no Goofish link is available. Maker names display name / name_zh, showing the available name if one is missing. Characters display English / Japanese, showing the available name if one is missing. Prices use the latest CNY reference rates from [Frankfurter](https://frankfurter.dev/v1/), rounded to two decimals for USD and whole yen for JPY. Rate lookup failures stop the run before any reservation. When the queue is empty, it sends nothing; it does not recycle listings.
+Each server independently receives the oldest never-reserved `FOR_SALE` listing created at least 24 hours ago, ordered by `createdAt` and ID. Manual and imported listings are included. Empty queues send nothing and never recycle listings. Prices use current CNY to USD/JPY rates from Frankfurter.
 
-## Discord setup
+## Database rollout
 
-1. Open <https://discord.com/developers/applications>, create **KiguDB Resell**, and open **Bot**. Generate/reset its token. Keep the token in local `.env` and GitHub secrets; do not paste it into chat or commit it.
-2. Under **Installation**, enable **Guild Install**, add the `bot` scope, and select **View Channels**, **Send Messages**, and **Embed Links**. Install the app into your server using the provided install link. Administrator and privileged intents are unnecessary. Use a normal text channel, and make sure its permission overrides allow the bot these permissions.
-3. In Discord settings, enable **Advanced → Developer Mode**. Right-click the destination channel and **Copy Channel ID**.
-4. Add `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID` to local `.env`. The existing `DATABASE_URL` must point to the same database as the website.
+The website Prisma schema (`../kigudb-info/prisma/schema.prisma`) defines:
 
-## Initialize and preview
+- `ResellPostTranslation`: one shared English title per listing, with model and input hash.
+- `DiscordServer`: guild ID, destination channel, enabled flag, latest confirmed post/message/time.
+- `DiscordDelivery`: permanent server/listing reservations and confirmed message IDs/times.
 
-From this project in PowerShell:
+Before running the updated worker, apply `sql/discord-state.sql` to the existing PostgreSQL database. This additive, transactional SQL was generated from the Prisma schema diff. It creates only the three new tables, their indexes, and foreign keys; it does not alter listing data. Use your database SQL console or, with a standard PostgreSQL URL in the PowerShell environment:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-discord.txt
-.\.venv\Scripts\python.exe discord_bot.py --env-file .env --setup
-.\.venv\Scripts\python.exe discord_bot.py --env-file .env
+psql "$env:DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/discord-state.sql
 ```
 
-`--setup` optionally initializes `.cache/discord-deliveries.sqlite3`; sending and preview also initialize it automatically. The listings database is always read-only. Preview sends nothing. Use `--cache-file PATH` to choose a different cache file. To send the first real post:
+Apply it once. If these tables already exist, inspect their schema before applying; the script intentionally fails instead of silently accepting an incompatible table. This repository does not apply schema changes automatically. Regenerate the website Prisma client after updating its schema using `npx prisma generate` in the website project.
+
+The worker's `DATABASE_URL` must have read access to listings and write access to the three new tables. It locks listing rows while generating translations; it never changes listing content. Local and Actions runs now share history through PostgreSQL. Use a database endpoint that supports transactions and row locks; transaction pooling is supported.
+
+## Enroll servers
+
+Install the Discord bot into each server with View Channel, Send Messages, Embed Links, and Attach Files permissions for its destination channel. Use server text or announcement channels. Privileged intents and Administrator are unnecessary.
+
+Set `DATABASE_URL` and `DISCORD_BOT_TOKEN` in local `.env`, then enroll each server by its destination channel ID:
 
 ```powershell
+.\.venv\Scripts\python.exe discord_bot.py --env-file .env --enroll 111111111111111111
+```
+
+Enrollment reads the channel's guild ID from Discord and creates or updates its `DiscordServer` row. One destination channel is supported per server. Explicit re-enrollment updates the channel and enables the server, preserving its delivery history. New servers start at the oldest eligible listing.
+
+Set `DiscordServer.enabled = false` in the database to pause a server. Update `channelId` or use `--enroll` to change its destination. Changing the destination preserves server-level deduplication. New rows can also be managed through Prisma; guild and channel snowflakes are strings.
+
+Existing `DISCORD_CHANNEL_IDS` (comma or space separated) and `DISCORD_CHANNEL_ID` remain bootstrap options for `--send` and `--setup`. Unregistered channels are resolved using Discord and enrolled only if their server is new. Bootstrap never re-enables or overwrites existing servers. Remove these variables after moving enrollment management to the database. Runs load every enabled server from the database, including servers absent from the environment.
+
+## Preserve existing delivery history
+
+Before enabling the updated workflow, retain the latest `.cache/discord-deliveries.sqlite3` file. Enroll every channel present in that history, then run:
+
+```powershell
+.\.venv\Scripts\python.exe discord_bot.py --env-file .env --setup
+```
+
+`--setup` enrolls environment channels and imports legacy history without sending. `--cache-file PATH` chooses another legacy file. Existing `--send` runs also import the file when present. Imports are transactional and repeatable: confirmed messages and uncertain reservations are preserved, missing/deleted listings are skipped, and newer confirmed cache deliveries upgrade older or unconfirmed database rows; older or unconfirmed cache entries never replace confirmed database deliveries. The latest confirmed delivery advances each server's latest-post fields only when its send time is newer, so a restored GitHub Actions cache ahead of PostgreSQL brings the database up to its progress without moving it backward. Unknown legacy channels stop the import before sending; enroll them first. Import every retained channel history before changing its destination.
+
+The Actions workflow keeps the existing cache **restore** step for this transition and imports the restored history before sending. It no longer saves SQLite snapshots. After successful import, PostgreSQL is authoritative; the legacy file/cache can be retired along with the restore step. If the old cache has already been lost, recover it or seed delivery history before enabling posting to avoid reposts.
+
+## Preview and send
+
+Add `GROQ_API_KEY` to `.env` and GitHub Actions secrets. Optional `GROQ_MODEL` defaults to `openai/gpt-oss-20b`. Cache hits do not need a Groq key. Install `requirements-discord.txt`, then:
+
+```powershell
+.\.venv\Scripts\python.exe discord_bot.py --env-file .env --check
+.\.venv\Scripts\python.exe discord_bot.py --env-file .env
 .\.venv\Scripts\python.exe discord_bot.py --env-file .env --send
 ```
 
-## Free hosting with GitHub Actions
+Preview sends nothing and creates no delivery reservations, but populates the shared translation cache. `--check` checks authentication and enabled channel access without translation or sending. `--setup` does not create database tables.
 
-1. Push this project, including `.github/workflows/discord-hourly.yml`, to the default branch of a **public** GitHub repository. `.env` is ignored; do not commit credentials. Existing public repository setup for the daily importer can be reused.
-2. In **Settings → Secrets and variables → Actions → Secrets**, add `DATABASE_URL`, `DISCORD_BOT_TOKEN`, and `DISCORD_CHANNEL_ID`. Reuse the existing database secret if configured. The runner needs network access to the database and Discord.
-3. Delivery history is restored and saved automatically using GitHub Actions cache. No database setup is needed.
-4. Under Actions **Variables**, set `DISCORD_POSTING_ENABLED` to `true`. This explicitly enables both scheduled and manual runs. Set it to `false` to stop posting.
-5. Under **Actions → Discord resell post every 30 minutes → Run workflow**, leave **send** unchecked to preview. Check **send** for a real message. Automatic runs are triggered by the Cloudflare Worker at minutes **07 and 37** of every UTC hour. Follow [Cloudflare setup](cloudflare-cron/README.md) to deploy it. GitHub?s native schedule is disabled; keep the workflow enabled for API dispatch and manual runs.
+The full first line of the note is translated with available maker, character, media, and sub-media reference names. The cache hash includes source title, reference names, prompt, and model, so changing them refreshes the translation. Empty titles are cached without calling Groq. Failed translations are neither cached nor reserved. Concurrent requests for the same listing serialize around the cache check to avoid duplicate translation calls.
 
-Standard GitHub-hosted runners are free for public repositories: <https://docs.github.com/en/actions/concepts/billing-and-usage>. Private repositories consume your plan's minutes, shared with the importer; do not assume they will remain free. No additional hosting service is needed; your existing database costs remain separate.
-
-Cloudflare controls the posting schedule, and GitHub Actions executes each dispatched run. GitHub runner queues can still delay execution. The bot has no internal cooldown: each send run can post one unposted listing. Cloudflare dispatches appear as manual/API-triggered workflow runs in GitHub.
+Embeds show the English title, price, maker, character, cover, and Goofish link when available. Titles longer than 256 characters are included in full in the description; translations beyond embed limits are attached as `translation.txt`. Existing Discord messages are never edited.
 
 ## Delivery tracking and recovery
 
-Delivery history lives in `.cache/discord-deliveries.sqlite3` inside this project, ignored by Git. It records each channel/listing pair, reservation time, Discord message ID, and sent time. SQLite locking serializes processes sharing the same file. Each attempt reserves its listing before contacting Discord to prevent duplicate delivery. Price changes do not cause reposts.
+A database row lock serializes runs for each server. Busy or disabled servers are skipped. Before contacting Discord, the worker permanently records a `DiscordDelivery` reservation in a separate committed transaction. Successful sends atomically confirm the delivery and update the server's latest post/message/time. A failure in one server does not stop attempts for other enrolled servers; the run reports failure afterward.
 
-GitHub Actions restores the latest cache and saves a new snapshot even after a failed send. Workflow concurrency prevents overlapping Actions runs. Caches can be evicted or deleted; losing the cache loses deduplication history. Local runs and Actions have separate histories unless you copy the cache between them. Use a single runner/history for a channel to avoid duplicates.
+An unconfirmed delivery has `sentAt` and `messageId` null. Timeouts, process crashes, and rejected HTTP requests retain that reservation for review, preventing automatic duplicate sends. Later runs can continue with other unreserved posts. Check Discord before deleting an unconfirmed reservation to allow a retry. `latestPostId` tracks confirmed delivery, while the full delivery table supplies deduplication even for uncertain sends and channel changes. Price edits do not trigger reposts.
 
-Failed or uncertain sends remain reserved with `sent_at` null. Inspect the `deliveries` table with a SQLite viewer and check the Discord channel before removing a reservation to retry. The bot does not automatically retry HTTP errors. Back up the file if delivery history must be retained permanently.
+## GitHub Actions and Cloudflare
 
-When switching from the previous database delivery log, existing history is not automatically imported. Populate the SQLite cache from the old log before enabling posting if you need to avoid reposting previously shared listings. The old database table is no longer used or modified.
+Keep `DATABASE_URL`, `DISCORD_BOT_TOKEN`, and `GROQ_API_KEY` in repository Actions secrets. Optional `GROQ_MODEL` is an Actions variable. Set `DISCORD_POSTING_ENABLED=true` to enable runs. No destination secret is needed after enrollment. Under **Discord resell post every 10 minutes**, a manual run previews unless **send** is checked.
 
-Discord references: <https://discord.com/developers/docs/quick-start/getting-started>, <https://discord.com/developers/docs/resources/message#create-message>.
+Cloudflare dispatches real sends at :00, :10, :20, :30, :40, and :50 each UTC hour. See [Cloudflare setup](cloudflare-cron/README.md). API-triggered runs appear as manual runs in Actions. Workflow concurrency serializes Actions runs; database locks additionally protect against overlapping local/other runners. Each run has a 30-minute timeout for multiple servers; inspect run durations as enrollment grows.
 
-## English title translation with Groq
+## Tests
 
-Add `GROQ_API_KEY` to local `.env` and to GitHub repository Actions secrets. The workflow passes it to the bot. Optionally set `GROQ_MODEL` in `.env` or as an Actions variable; the default is `openai/gpt-oss-20b`.
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
-Only the first line of the listing note (the original listing title) is sent to Groq for English translation and used as the clickable embed title, limited to 256 characters. The translated note block and source metadata are omitted from the embed; its description contains only the Goofish link. The prompt requires ?\u5934\u58f3 = mask?. Preview also calls Groq. Empty titles need no translation. Failed translations stop before a reservation is saved. Existing Discord posts are not edited.
-
-Translation prompts include available English, Chinese, and Japanese maker, character, media (Origin), and sub-media (SubOrigin) names from the listing?s relations. These references guide translation of names already mentioned in the title, preferring stored English names. Price, maker, and character fields keep their existing formatting.
-
-If the English title exceeds 256 characters, its full translation also appears in the embed body above the Goofish link. If the translation exceeds Discord embed limits, it is attached in full as `translation.txt` instead (the bot then needs Attach Files permission).
-
-The entire listing title is passed to Groq before applying Discord title limits. Chinese names may remain in the result; their presence does not trigger rejection or a retry.
-
-## Multiple Discord channels
-
-Set `DISCORD_CHANNEL_IDS` in local `.env` and GitHub Actions secrets to comma-separated channel IDs, for example `111111111111111111,222222222222222222`. This overrides the existing single `DISCORD_CHANNEL_ID`, which remains supported. Repeated IDs are processed once.
-
-Each trigger sends at most one oldest unposted FOR_SALE listing that is at least 24 hours old to each channel. SQLite delivery history is keyed by channel and listing, so a new channel starts from the oldest available listing independently of existing channels. Keep the current Actions cache to preserve existing history. Adding the bot to a server does not select its destination automatically; add the destination channel ID and grant the bot channel permissions. A failure in one channel does not prevent attempts for the others, but makes the workflow fail visibly. No Cloudflare configuration change is needed.
+PostgreSQL integration tests require `TEST_DISCORD_DATABASE_URL` pointing to a disposable database with permission to create/drop schemas. They create an isolated schema per test and mock Discord/Groq, covering caching, invalidation, enrollment, migration, latest-post updates, failure recovery, and concurrent runs. Without this variable they are skipped.

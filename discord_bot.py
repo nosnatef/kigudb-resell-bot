@@ -4,8 +4,8 @@ import hashlib
 import json
 import os
 import sqlite3
-import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -45,18 +45,15 @@ def database_error_hint(error):
 
 
 @contextmanager
-def delivery_cache(path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cache = sqlite3.connect(path, timeout=30)
-    try:
-        cache.execute("""CREATE TABLE IF NOT EXISTS deliveries (
-            channel_id TEXT NOT NULL, post_id TEXT NOT NULL,
-            reserved_at REAL NOT NULL, message_id TEXT, sent_at REAL,
-            PRIMARY KEY (channel_id, post_id))""")
-        cache.commit()
-        yield cache
-    finally:
-        cache.close()
+def server_lock(conn, server_id):
+    # Keep the row locked through reservation, HTTP send, and confirmation.
+    # A separate connection commits reservations before HTTP, so uncertain sends
+    # survive crashes while this transaction serializes all runners per server.
+    with conn.transaction():
+        server = conn.execute('''SELECT * FROM "DiscordServer"
+            WHERE "guildId" = %s AND enabled = true FOR NO KEY UPDATE SKIP LOCKED''',
+            (server_id,)).fetchone()
+        yield server
 
 
 def https_url(value):
@@ -170,9 +167,32 @@ def translate_title(note, references=None):
         raise DiscordDeliveryError("Groq translation failed or returned incomplete text; no listing reserved.") from error
 
 
-def prepare_translation(post):
+def prepare_translation(post, conn=None):
     title = (post.get("note") or "").split("\n")[0].strip()
-    post["english_title"] = translate_title(title, translation_references(post))
+    references = translation_references(post)
+    if conn is None:
+        post["english_title"] = translate_title(title, references)
+        return
+    model = os.environ.get("GROQ_MODEL", "").strip() or "openai/gpt-oss-20b"
+    fingerprint = hashlib.sha256(json.dumps(
+        [title, references, TRANSLATION_PROMPT, model],
+        ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    with conn.transaction():
+        # Row locking works with transaction-pooling database endpoints too.
+        conn.execute('SELECT id FROM "ResellPost" WHERE id = %s FOR UPDATE', (post["id"],))
+        cached = conn.execute('''SELECT "sourceHash", "englishTitle"
+            FROM "ResellPostTranslation" WHERE "postId" = %s''', (post["id"],)).fetchone()
+        if cached and cached["sourceHash"] == fingerprint:
+            post["english_title"] = cached["englishTitle"]
+            return
+        translated = translate_title(title, references)
+        conn.execute('''INSERT INTO "ResellPostTranslation"
+            ("postId", "sourceHash", model, "englishTitle", "updatedAt")
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT ("postId") DO UPDATE SET "sourceHash" = EXCLUDED."sourceHash",
+            model = EXCLUDED.model, "englishTitle" = EXCLUDED."englishTitle",
+            "updatedAt" = EXCLUDED."updatedAt"''', (post["id"], fingerprint, model, translated))
+        post["english_title"] = translated
 
 
 def payload(post, channel_id, rates):
@@ -211,11 +231,9 @@ def payload(post, channel_id, rates):
     return message
 
 
-def next_post(conn, channel_id, cache):
+def next_post(conn, server_id):
     # Includes manual and imported posts. No Feishu filtering, as requested.
-    excluded = [row[0] for row in cache.execute(
-        "SELECT post_id FROM deliveries WHERE channel_id = ?", (channel_id,))]
-    return conn.execute(f'''
+    return conn.execute('''
         SELECT p.id, p."priceRMB", p.note, p."coverImageUrl",
             m.name AS maker_en, m.name_zh AS maker_zh, m.name_jp AS maker_jp,
             c.name AS character, c.name_zh AS character_zh, c.name_jp AS character_jp,
@@ -228,27 +246,21 @@ def next_post(conn, channel_id, cache):
         LEFT JOIN "Character" c ON c.id = p.characterid
         LEFT JOIN "Origin" o ON o.id = c."originId"
         LEFT JOIN "SubOrigin" so ON so.id = c."subOriginId"
-        WHERE p.status = 'FOR_SALE' AND NOT (p.id::text = ANY(%s::text[]))
+        WHERE p.status = 'FOR_SALE' AND NOT EXISTS (
+            SELECT 1 FROM "DiscordDelivery" d WHERE d."serverId" = %s AND d."postId" = p.id)
           AND p."createdAt" <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '24 hours'
         ORDER BY p."createdAt" ASC, p.id ASC LIMIT 1
-    ''', (excluded,)).fetchone()
+    ''', (server_id,)).fetchone()
 
 
-def reserve(conn, channel_id, cache, prepare=None):
-    # Serialize processes sharing this file and persist before contacting Discord.
-    cache.execute("BEGIN IMMEDIATE")
-    try:
-        post = next_post(conn, channel_id, cache)
-        if post:
-            if prepare:
-                prepare(post)
-            cache.execute("INSERT INTO deliveries (channel_id, post_id, reserved_at) VALUES (?, ?, ?)",
-                          (channel_id, post["id"], time.time()))
-        cache.commit()
-        return post
-    except Exception:
-        cache.rollback()
-        raise
+def reserve(conn, server):
+    post = next_post(conn, server["guildId"])
+    if post:
+        prepare_translation(post, conn)
+        # conn is autocommit: persist before the external HTTP request.
+        conn.execute('''INSERT INTO "DiscordDelivery" ("serverId", "postId", "channelId")
+            VALUES (%s, %s, %s)''', (server["guildId"], post["id"], server["channelId"]))
+    return post
 
 
 def send_message(token, channel_id, message):
@@ -299,66 +311,147 @@ def configured_channels(environ):
     return channels
 
 
-def process_channel(conn, cache, channel_id, token, rates, send):
-    post = reserve(conn, channel_id, cache, prepare_translation) if send else next_post(conn, channel_id, cache)
-    if not post:
-        print(json.dumps({"channelId": channel_id, "status": "empty"}))
+def enroll_channel(conn, token, channel_id, replace=True):
+    if not channel_id.isascii() or not channel_id.isdigit():
+        raise DiscordDeliveryError("Channel ID must be numeric.")
+    response = requests.get(f"https://discord.com/api/v10/channels/{channel_id}",
+                            headers={"Authorization": f"Bot {token}"}, timeout=15)
+    if response.status_code != 200:
+        raise DiscordDeliveryError(f"Cannot enroll channel {channel_id}: Discord HTTP {response.status_code}.")
+    channel = response.json()
+    guild_id = channel.get("guild_id")
+    if not isinstance(guild_id, str) or not guild_id.isascii() or not guild_id.isdigit() or channel.get("type") not in (0, 5):
+        raise DiscordDeliveryError("Enroll a server text or announcement channel, not a DM, thread, or forum.")
+    conflict = ('DO UPDATE SET "channelId" = EXCLUDED."channelId", enabled = true, "updatedAt" = CURRENT_TIMESTAMP'
+                if replace else 'DO NOTHING')
+    conn.execute(f'''INSERT INTO "DiscordServer" ("guildId", "channelId", "updatedAt")
+        VALUES (%s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT ("guildId") {conflict}''', (guild_id, channel_id))
+    print(json.dumps({"status": "enrollment-checked", "serverId": guild_id, "channelId": channel_id}))
+
+
+def import_history(conn, path):
+    """Idempotently import the old SQLite file, including unconfirmed reservations."""
+    if not path.is_file():
         return
-    if not send:
-        prepare_translation(post)
-    message = payload(post, channel_id, rates)
-    if not send:
-        print(json.dumps({"mode": "preview", "channelId": channel_id, "postId": post["id"], "message": message}, indent=2))
-        return
-    message_id = send_message(token, channel_id, message)
-    cache.execute("""UPDATE deliveries SET message_id = ?, sent_at = ?
-        WHERE channel_id = ? AND post_id = ?""", (message_id, time.time(), channel_id, post["id"]))
-    cache.commit()
-    print(json.dumps({"status": "sent", "channelId": channel_id, "postId": post["id"], "messageId": message_id}))
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as cache:
+        rows = cache.execute("SELECT channel_id, post_id, reserved_at, message_id, sent_at FROM deliveries").fetchall()
+    with conn.transaction():
+        servers = conn.execute('SELECT "guildId", "channelId" FROM "DiscordServer" FOR NO KEY UPDATE').fetchall()
+        # A retained legacy snapshot must still import after a destination moves.
+        by_channel = {row["channelId"]: row["serverId"] for row in conn.execute(
+            'SELECT DISTINCT "channelId", "serverId" FROM "DiscordDelivery"').fetchall()}
+        by_channel.update({server["channelId"]: server["guildId"] for server in servers})
+        for channel_id, post_id, reserved_at, message_id, sent_at in rows:
+            if channel_id not in by_channel:
+                raise DiscordDeliveryError(f"Enroll legacy channel {channel_id} before importing its history.")
+            # Deleted posts need no deduplication; keep every surviving reservation.
+            conn.execute('''INSERT INTO "DiscordDelivery"
+                ("serverId", "postId", "channelId", "reservedAt", "messageId", "sentAt")
+                SELECT %s, id, %s, %s, %s, %s FROM "ResellPost" WHERE id = %s
+                ON CONFLICT ("serverId", "postId") DO UPDATE SET
+                    "channelId" = EXCLUDED."channelId",
+                    "messageId" = EXCLUDED."messageId", "sentAt" = EXCLUDED."sentAt"
+                WHERE EXCLUDED."sentAt" IS NOT NULL AND EXCLUDED."messageId" IS NOT NULL
+                    AND ("DiscordDelivery"."sentAt" IS NULL
+                         OR "DiscordDelivery"."messageId" IS NULL
+                         OR "DiscordDelivery"."sentAt" < EXCLUDED."sentAt")''',
+                (by_channel[channel_id], channel_id, datetime.fromtimestamp(reserved_at, timezone.utc),
+                 message_id, datetime.fromtimestamp(sent_at, timezone.utc) if sent_at else None, post_id))
+        conn.execute('''UPDATE "DiscordServer" s SET "latestPostId" = d."postId",
+            "latestMessageId" = d."messageId", "latestSentAt" = d."sentAt", "updatedAt" = CURRENT_TIMESTAMP
+            FROM (SELECT DISTINCT ON ("serverId") "serverId", "postId", "messageId", "sentAt"
+                FROM "DiscordDelivery" WHERE "sentAt" IS NOT NULL AND "messageId" IS NOT NULL
+                ORDER BY "serverId", "sentAt" DESC, "postId" DESC) d
+            WHERE s."guildId" = d."serverId" AND (s."latestSentAt" IS NULL OR s."latestSentAt" < d."sentAt")''')
+    print(json.dumps({"status": "history-imported", "recordsRead": len(rows)}))
+
+
+def process_channel(conn, lock_conn, server_id, token, rates, send):
+    with server_lock(lock_conn, server_id) as server:
+        if not server:
+            print(json.dumps({"serverId": server_id, "status": "disabled-or-busy"}))
+            return
+        channel_id = server["channelId"]
+        post = reserve(conn, server) if send else next_post(conn, server_id)
+        if not post:
+            print(json.dumps({"serverId": server_id, "channelId": channel_id, "status": "empty"}))
+            return
+        if not send:
+            prepare_translation(post, conn)
+        message = payload(post, channel_id, rates)
+        if not send:
+            print(json.dumps({"mode": "preview", "serverId": server_id, "channelId": channel_id,
+                              "postId": post["id"], "message": message}, indent=2))
+            return
+        message_id = send_message(token, channel_id, message)
+        # Both confirmation and latest-post pointer commit atomically. On failure
+        # the independently committed reservation remains for operator review.
+        confirmed = lock_conn.execute('''UPDATE "DiscordDelivery" SET "messageId" = %s,
+            "sentAt" = clock_timestamp() AT TIME ZONE 'UTC'
+            WHERE "serverId" = %s AND "postId" = %s RETURNING "sentAt"''',
+            (message_id, server_id, post["id"])).fetchone()
+        lock_conn.execute('''UPDATE "DiscordServer" SET "latestPostId" = %s,
+            "latestMessageId" = %s, "latestSentAt" = %s, "updatedAt" = CURRENT_TIMESTAMP
+            WHERE "guildId" = %s''', (post["id"], message_id, confirmed["sentAt"], server_id))
+    print(json.dumps({"status": "sent", "serverId": server_id, "channelId": channel_id,
+                      "postId": post["id"], "messageId": message_id}))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", type=Path)
-    parser.add_argument("--cache-file", type=Path, default=DEFAULT_CACHE)
+    parser.add_argument("--cache-file", type=Path, default=DEFAULT_CACHE,
+                        help="Legacy SQLite history to import before sending (if present)")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--check", action="store_true", help="Check Discord authentication and channel access without sending")
-    mode.add_argument("--setup", action="store_true", help="Initialize the local delivery cache; sends nothing")
-    mode.add_argument("--send", action="store_true", help="Reserve and send one listing; default is read-only preview")
+    mode.add_argument("--check", action="store_true", help="Check authentication and enrolled channel access")
+    mode.add_argument("--setup", action="store_true", help="Enroll environment channels and import legacy history; sends nothing")
+    mode.add_argument("--enroll", metavar="CHANNEL_ID", help="Enroll a server's destination channel; sends nothing")
+    mode.add_argument("--send", action="store_true", help="Send one listing per enabled server; default previews and caches translations")
     args = parser.parse_args()
     if args.env_file:
         load_dotenv(args.env_file, override=False)
-    channels = [] if args.setup else configured_channels(os.environ)
     token = os.environ.get("DISCORD_BOT_TOKEN", "")
-    if (args.send or args.check) and not token:
-        raise ValueError("Set DISCORD_BOT_TOKEN")
-    if args.check:
-        endpoints = [("Bot authentication", "users/@me")] + [
-            (f"Channel {channel_id} access", f"channels/{channel_id}") for channel_id in channels]
-        for label, endpoint in endpoints:
-            response = requests.get(f"https://discord.com/api/v10/{endpoint}",
-                                    headers={"Authorization": f"Bot {token}"}, timeout=15)
-            try:
-                code = response.json().get("code")
-            except (ValueError, AttributeError):
-                code = None
-            detail = f" (Discord code {code})" if type(code) is int else ""
-            print(f"{label}: HTTP {response.status_code}{detail}")
-        return
-    with delivery_cache(args.cache_file) as cache:
+    if (args.send or args.check or args.setup or args.enroll) and not token:
+        raise DiscordDeliveryError("Set DISCORD_BOT_TOKEN")
+    with psycopg.connect(database_url(os.environ["DATABASE_URL"]), row_factory=dict_row,
+                         autocommit=True, connect_timeout=15, options="-c timezone=UTC") as conn:
+        if args.enroll:
+            enroll_channel(conn, token, args.enroll)
+            return
+        # Backward compatibility: bootstrap new environment channels only. Existing
+        # rows (including disabled servers) are managed in the database thereafter.
+        if args.send or args.setup:
+            if os.environ.get("DISCORD_CHANNEL_IDS", "").strip() or os.environ.get("DISCORD_CHANNEL_ID", "").strip():
+                for channel_id in configured_channels(os.environ):
+                    existing = conn.execute('SELECT "guildId" FROM "DiscordServer" WHERE "channelId" = %s',
+                                            (channel_id,)).fetchone()
+                    if not existing:
+                        enroll_channel(conn, token, channel_id, replace=False)
+            import_history(conn, args.cache_file)
+        servers = conn.execute('SELECT * FROM "DiscordServer" WHERE enabled = true ORDER BY "guildId"').fetchall()
         if args.setup:
-            print("Local delivery cache ready. No message sent.")
+            print(f"Database delivery tracking ready: {len(servers)} enabled server(s). No message sent.")
+            return
+        if args.check:
+            endpoints = [("Bot authentication", "users/@me")] + [
+                (f"Channel {server['channelId']} access", f"channels/{server['channelId']}") for server in servers]
+            for label, endpoint in endpoints:
+                response = requests.get(f"https://discord.com/api/v10/{endpoint}",
+                                        headers={"Authorization": f"Bot {token}"}, timeout=15)
+                print(f"{label}: HTTP {response.status_code}")
+            return
+        if not servers:
+            print("No enabled servers. Enroll a channel with --enroll CHANNEL_ID first.")
             return
         rates = exchange_rates()
         with psycopg.connect(database_url(os.environ["DATABASE_URL"]), row_factory=dict_row,
-                             autocommit=True, connect_timeout=15) as conn:
-            conn.execute("SET default_transaction_read_only = on")
+                             autocommit=True, connect_timeout=15, options="-c timezone=UTC") as lock_conn:
             failed = 0
-            for channel_id in channels:
+            for server in servers:
                 try:
-                    process_channel(conn, cache, channel_id, token, rates, args.send)
+                    process_channel(conn, lock_conn, server["guildId"], token, rates, args.send)
                 except Exception as error:
-                    cache.rollback()
                     failed += 1
                     if isinstance(error, DiscordDeliveryError):
                         detail = str(error)
@@ -366,9 +459,9 @@ def main():
                         detail = database_error_hint(error)
                     else:
                         detail = f"Operation failed ({type(error).__name__}); inspect delivery history before retrying."
-                    print(f"Channel {channel_id}: {detail}")
+                    print(f"Server {server['guildId']}: {detail}")
             if failed:
-                raise DiscordDeliveryError(f"{failed} channel(s) failed; other channels were still processed.")
+                raise DiscordDeliveryError(f"{failed} server(s) failed; other servers were still processed.")
 
 
 
@@ -382,7 +475,7 @@ if __name__ == "__main__":
         print(f"Discord poster failed: {database_error_hint(error)}")
         raise SystemExit(1)
     except sqlite3.OperationalError:
-        print("Discord poster failed: local SQLite cache could not be accessed. Check cache permissions, disk space, and concurrent local processes.")
+        print("Discord poster failed: legacy SQLite history could not be read. Check the history file and its permissions.")
         raise SystemExit(1)
     except Exception as error:
         # HTTP/DB exception strings can contain credentials. Never log them.

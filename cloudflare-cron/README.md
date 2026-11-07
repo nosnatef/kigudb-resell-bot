@@ -1,6 +1,6 @@
 # Cloudflare schedule for the Discord bot
 
-Cloudflare triggers the existing GitHub Actions workflow at :07 and :37 each UTC hour. GitHub still runs Python and persists the SQLite cache. No public HTTP endpoint is enabled. GitHub runner queue delays can still occur.
+Cloudflare triggers the existing GitHub Actions workflow every 10 minutes (:00, :10, :20, :30, :40, and :50 UTC), posting one listing per enabled server per run. GitHub runs Python; PostgreSQL stores enrolled servers, delivery history, and shared translations. Apply the database changes and import legacy history as described in [Discord setup](../DISCORD.md) before running the updated workflow. No public HTTP endpoint is enabled. GitHub runner queue delays can still occur.
 
 ## Deploy
 
@@ -17,7 +17,7 @@ wrangler.cmd deploy
 
 Paste the GitHub token at the secret prompt, never into a tracked file. If Wrangler offers to create the Worker when setting its first secret, accept. If you have several Cloudflare accounts, add the intended account_id to wrangler.toml before deployment.
 
-4. Verify Cloudflare Workers & Pages -> kigudb-discord-cron -> Settings -> Triggers shows 7,37 * * * *. Trigger changes may take up to 15 minutes to propagate.
+4. Verify Cloudflare Workers & Pages -> kigudb-discord-cron -> Settings -> Triggers shows */10 * * * *. Trigger changes may take up to 15 minutes to propagate.
 5. Watch Cloudflare logs with `wrangler.cmd tail`. A successful dispatch logs ?GitHub accepted the Discord workflow dispatch?. Then verify the corresponding GitHub Actions run succeeds and Discord receives the post. Cloudflare-triggered runs appear as workflow_dispatch/manual runs by the GitHub token owner, not schedule events.
 
 The Worker only needs its GITHUB_TOKEN secret; database, Groq, and Discord credentials remain in GitHub Actions. Do not disable the GitHub workflow itself, because that would also block Cloudflare dispatches. To pause posting, set DISCORD_POSTING_ENABLED=false in GitHub. To stop dispatching entirely, remove the Cloudflare cron trigger.

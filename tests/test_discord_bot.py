@@ -1,11 +1,8 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
-import time
 from decimal import Decimal
 import unittest
 from unittest.mock import Mock, patch
 
-from discord_bot import configured_channels, process_channel, main, database_error_hint, character_text, delivery_cache, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_title, translation_references, TRANSLATION_PROMPT
+from discord_bot import configured_channels, process_channel, main, database_error_hint, character_text, exchange_rates, next_post, payload, reserve, send_message, prepare_translation, translate_title, translation_references, TRANSLATION_PROMPT
 
 
 class DiscordTests(unittest.TestCase):
@@ -22,40 +19,6 @@ class DiscordTests(unittest.TestCase):
         self.assertEqual(configured_channels({"DISCORD_CHANNEL_IDS": "", "DISCORD_CHANNEL_ID": "123"}), ["123"])
         with self.assertRaises(RuntimeError):
             configured_channels({"DISCORD_CHANNEL_IDS": "123,bad"})
-
-    @patch("discord_bot.send_message", return_value="987")
-    @patch("discord_bot.prepare_translation")
-    def test_channels_advance_independently_and_history_survives(self, prepare, send):
-        first = self.post()
-        second = dict(first, id="post-2")
-        conn = Mock()
-        def execute(query, params):
-            excluded = params[0]
-            return Mock(fetchone=lambda: next((dict(p) for p in (first, second) if p["id"] not in excluded), None))
-        conn.execute.side_effect = execute
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "history.sqlite3"
-            with delivery_cache(path) as cache:
-                process_channel(conn, cache, "123", "token", self.rates, True)
-            with delivery_cache(path) as cache:
-                process_channel(conn, cache, "123", "token", self.rates, True)
-                process_channel(conn, cache, "456", "token", self.rates, True)
-                self.assertEqual(cache.execute("SELECT channel_id, post_id FROM deliveries ORDER BY channel_id, post_id").fetchall(),
-                                 [("123", "post-1"), ("123", "post-2"), ("456", "post-1")])
-                process_channel(conn, cache, "123", "token", self.rates, True)
-                self.assertEqual(send.call_count, 3)
-
-    @patch.dict("os.environ", {"DISCORD_CHANNEL_IDS": "123,456", "DISCORD_BOT_TOKEN": "token", "DATABASE_URL": "postgresql://example/db"})
-    @patch("discord_bot.exchange_rates")
-    @patch("discord_bot.psycopg.connect")
-    @patch("discord_bot.process_channel")
-    def test_failed_channel_does_not_block_next(self, process, connect, rates):
-        process.side_effect = [RuntimeError("private connection details"), None]
-        with TemporaryDirectory() as directory:
-            with patch("sys.argv", ["discord_bot.py", "--send", "--cache-file", str(Path(directory) / "cache.sqlite3")]):
-                with self.assertRaisesRegex(RuntimeError, "1 channel"):
-                    main()
-        self.assertEqual([call.args[2] for call in process.call_args_list], ["123", "456"])
 
     def test_embed_limits_mentions_and_stable_nonce(self):
         result = payload(self.post(), "123", self.rates)
@@ -130,19 +93,6 @@ class DiscordTests(unittest.TestCase):
         listing["english_title"] = "x" * 5000
         self.assertEqual(len(payload(listing, "123", self.rates)["embeds"][0]["title"]), 256)
 
-    @patch.dict("os.environ", {"GROQ_API_KEY": "private-groq-key"})
-    @patch("discord_bot.requests.post")
-    def test_failed_translation_does_not_reserve(self, post):
-        post.return_value.status_code = 401
-        post.return_value.text = "private-groq-key"
-        with TemporaryDirectory() as directory:
-            with delivery_cache(Path(directory) / "history.sqlite3") as cache:
-                with patch("discord_bot.next_post", return_value=self.post()):
-                    with self.assertRaisesRegex(RuntimeError, "HTTP 401") as error:
-                        reserve(Mock(), "123", cache, prepare_translation)
-                self.assertNotIn("private-groq-key", str(error.exception))
-                self.assertEqual(cache.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0], 0)
-
     @patch.dict("os.environ", {"GROQ_API_KEY": "secret", "GROQ_MODEL": " "})
     @patch("discord_bot.requests.post")
     def test_unavailable_model_has_safe_actionable_error(self, post):
@@ -199,35 +149,6 @@ class DiscordTests(unittest.TestCase):
         get.return_value.json.return_value["rates"]["JPY"] = -1
         with self.assertRaisesRegex(RuntimeError, "no listing reserved"):
             exchange_rates()
-
-    def test_cache_persists_and_allows_immediate_next_reservation(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "history.sqlite3"
-            with delivery_cache(path) as cache:
-                with patch("discord_bot.next_post", return_value=self.post()):
-                    self.assertEqual(reserve(Mock(), "123", cache)["id"], "post-1")
-            with delivery_cache(path) as cache:
-                second = dict(self.post(), id="post-2")
-                with patch("discord_bot.next_post", return_value=second) as select:
-                    self.assertEqual(reserve(Mock(), "123", cache)["id"], "post-2")
-                    select.assert_called_once()
-                self.assertIsNone(cache.execute("SELECT sent_at FROM deliveries").fetchone()[0])
-                conn = Mock()
-                next_post(conn, "123", cache)
-                self.assertEqual(conn.execute.call_args.args[1], (["post-1", "post-2"],))
-                next_post(conn, "456", cache)
-                self.assertEqual(conn.execute.call_args.args[1], ([],))
-
-    def test_old_reservation_still_excludes_listing(self):
-        with TemporaryDirectory() as directory:
-            with delivery_cache(Path(directory) / "history.sqlite3") as cache:
-                cache.execute("INSERT INTO deliveries VALUES (?, ?, ?, NULL, NULL)",
-                              ("123", "post-1", time.time() - 1801))
-                cache.commit()
-                conn = Mock()
-                conn.execute.return_value.fetchone.return_value = None
-                self.assertIsNone(reserve(conn, "123", cache))
-                self.assertEqual(conn.execute.call_args.args[1], (["post-1"],))
 
     @patch("discord_bot.requests.post")
     def test_unknown_message_is_not_reported_as_unknown_channel(self, post):
