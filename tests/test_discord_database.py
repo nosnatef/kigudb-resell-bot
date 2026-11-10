@@ -189,6 +189,17 @@ class DatabaseTests(unittest.TestCase):
             UPDATE "ResellPost" SET "createdAt" = CURRENT_TIMESTAMP WHERE id = 'p2' ''')
         self.assertIsNone(next_post(self.conn, "1"))
 
+    def test_selection_excludes_posts_older_than_one_month(self):
+        self.conn.execute('''UPDATE "ResellPost" SET "createdAt" =
+            (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 month' - INTERVAL '1 second'
+            WHERE id = 'p1' ''')
+        self.assertEqual(next_post(self.conn, "1")["id"], "p2")
+        # Hold the transaction time fixed to exercise the inclusive boundary.
+        with self.conn.transaction():
+            self.conn.execute('''UPDATE "ResellPost" SET "createdAt" =
+                (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 month' WHERE id = 'p1' ''')
+            self.assertEqual(next_post(self.conn, "1")["id"], "p1")
+
     @patch("discord_bot.payload", return_value={})
     @patch("discord_bot.send_message", return_value="987")
     @patch("discord_bot.translate_title", return_value="English title")

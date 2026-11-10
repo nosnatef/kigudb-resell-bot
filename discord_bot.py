@@ -249,6 +249,7 @@ def next_post(conn, server_id):
         WHERE p.status = 'FOR_SALE' AND NOT EXISTS (
             SELECT 1 FROM "DiscordDelivery" d WHERE d."serverId" = %s AND d."postId" = p.id)
           AND p."createdAt" <= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '24 hours'
+          AND p."createdAt" >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - INTERVAL '1 month'
         ORDER BY p."createdAt" ASC, p.id ASC LIMIT 1
     ''', (server_id,)).fetchone()
 

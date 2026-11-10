@@ -2,7 +2,7 @@
 
 Cloudflare dispatches the GitHub Actions workflow every 10 minutes. Each run sends at most one listing to each enabled, enrolled Discord server. GitHub runner queues can delay execution. The bot uses REST and needs no always-on Gateway process.
 
-Each server independently receives the oldest never-reserved `FOR_SALE` listing created at least 24 hours ago, ordered by `createdAt` and ID. Manual and imported listings are included. Empty queues send nothing and never recycle listings. Prices use current CNY to USD/JPY rates from Frankfurter.
+Each server independently receives the oldest never-reserved `FOR_SALE` listing created at least 24 hours ago and at most one calendar month ago (UTC), ordered by `createdAt` and ID. Manual and imported listings are included. Empty queues send nothing and never recycle listings. Prices use current CNY to USD/JPY rates from Frankfurter.
 
 ## Database rollout
 
